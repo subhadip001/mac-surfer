@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:mac-app-surfer}",
+            "name": "Debug VoiceMac",
+            "target": "VoiceMac",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug VoiceMac"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:mac-app-surfer}",
+            "name": "Release VoiceMac",
+            "target": "VoiceMac",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release VoiceMac"
+        }
+    ]
+}

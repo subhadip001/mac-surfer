@@ -1,0 +1,10 @@
+.build/
+build/
+*.app
+.DS_Store
+.swiftpm/
+Package.resolved
+
+# Local dev config may contain API keys. Keys belong in the Keychain.
+.env
+config.json
