@@ -12,7 +12,7 @@ struct SarvamParameterExtractor: ParameterExtractor {
     let model: String
     let session: URLSession
 
-    init(apiKey: String, model: String = "sarvam-30b") {
+    init(apiKey: String, model: String = "sarvam-105b") {
         self.apiKey = apiKey
         self.model = model
 

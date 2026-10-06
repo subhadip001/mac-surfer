@@ -57,6 +57,11 @@ final class Settings: ObservableObject {
         didSet { defaults.set(llmModel, forKey: "llmModel") }
     }
 
+    static let defaultLLMModel = "sarvam-105b"
+    static let availableLLMModels = ["sarvam-105b", "sarvam-105b-conversations"]
+    /// Models the API now rejects outright.
+    static let retiredLLMModels: Set<String> = ["sarvam-m", "sarvam-30b"]
+
     // MARK: Behaviour
 
     /// Execute safe actions from a stable prefix before the sentence ends.
@@ -117,7 +122,13 @@ final class Settings: ObservableObject {
             ?? .localFirst
         jevModel = d.string(forKey: "jevModel") ?? "jev-latest"
         jevBaseURL = d.string(forKey: "jevBaseURL") ?? "https://api.typesafe.ai"
-        llmModel = d.string(forKey: "llmModel") ?? "sarvam-30b"
+        // sarvam-m and sarvam-30b have both been retired server-side; a stored
+        // value pointing at either fails every request with HTTP 400, so it is
+        // migrated rather than left to break silently.
+        let storedLLM = d.string(forKey: "llmModel") ?? Settings.defaultLLMModel
+        llmModel = Settings.retiredLLMModels.contains(storedLLM)
+            ? Settings.defaultLLMModel
+            : storedLLM
 
         speculativeExecution = d.object(forKey: "speculativeExecution") as? Bool ?? true
         stabilityWindow = d.object(forKey: "stabilityWindow") as? Int ?? 2
@@ -144,13 +155,17 @@ enum RoutingMode: String, CaseIterable, Identifiable {
     /// The router still executes, but Jev is asked in parallel and its answer
     /// recorded for comparison. Nothing Jev says is executed.
     case shadow
+    /// Jev decides first and its choice is executed. The router is the
+    /// fallback for anything Jev declines.
+    case jevFirst
 
     var id: String { rawValue }
 
     var displayName: String {
         switch self {
         case .localFirst: return "Local first — Jev only for unmatched commands"
-        case .shadow: return "Shadow — always ask Jev, execute the router"
+        case .shadow: return "Shadow — always ask Jev, but execute the router"
+        case .jevFirst: return "Jev first — Jev decides and its choice runs"
         }
     }
 
@@ -159,7 +174,9 @@ enum RoutingMode: String, CaseIterable, Identifiable {
         case .localFirst:
             return "\"open chrome\" never reaches the network. Jev is consulted only when the deterministic router finds no command."
         case .shadow:
-            return "Every command is also sent to Jev so you can see its judgement next to the router's. Jev's answer is recorded but never executed, so this costs an API call per command."
+            return "Every command is also sent to Jev so you can see its judgement next to the router's. Jev's answer is recorded but never executed, so this costs an API call per command and changes nothing."
+        case .jevFirst:
+            return "Jev picks the action for every command and that choice is what runs. The deterministic router only handles what Jev declines. Adds Jev's round trip (~450 ms) to every command."
         }
     }
 }

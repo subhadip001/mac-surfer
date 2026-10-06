@@ -35,6 +35,8 @@ actor ActionPlanner {
     // Jev debouncing.
     private var lastJevText = ""
     private var jevInFlight = false
+    /// One shadow consultation per command.
+    private var shadowAsked = false
     private var lastJevAt: ContinuousClock.Instant?
     private let minimumJevInterval: Duration = .milliseconds(250)
 
@@ -68,6 +70,7 @@ actor ActionPlanner {
         lastJevText = ""
         jevInFlight = false
         lastJevAt = nil
+        shadowAsked = false
     }
 
     // MARK: Entry point
@@ -78,6 +81,21 @@ actor ActionPlanner {
         guard !trimmed.isEmpty else { return }
 
         if isFinal { await scheduler.markTranscriptFinal() }
+
+        // Jev-first: Jev's decision is what runs. The router is the fallback
+        // for anything Jev declines, so a failed or refused call still leaves
+        // the deterministic path working.
+        // Waiting for the complete sentence means there is nothing to gain from
+        // asking Jev about a partial — it just costs an extra call per command.
+        if routingMode == .jevFirst, isFinal || speculativeExecution {
+            let dispatched = await considerJev(text: trimmed,
+                                                isFinal: isFinal,
+                                                reason: "Jev-first routing")
+            if dispatched {
+                await latency.mark(.localIntentDetected)
+                return
+            }
+        }
 
         let clauses = router.parse(trimmed)
         var dispatchedAny = false
@@ -101,25 +119,31 @@ actor ActionPlanner {
 
         if dispatchedAny {
             await latency.mark(.localIntentDetected)
-            // In shadow mode we still ask Jev, purely so its judgement is
-            // visible alongside the router's. Its answer is not executed.
-            if routingMode == .shadow, isFinal {
-                await considerJev(text: trimmed, isFinal: isFinal,
-                                  reason: "shadow mode — comparing against the local router",
-                                  dryRun: true)
-            }
+            await askShadowIfNeeded(text: trimmed, isFinal: isFinal)
             return
         }
 
         // Nothing deterministic matched — this is what Jev is for.
-        if clauses.isEmpty {
-            await considerJev(text: trimmed, isFinal: isFinal,
-                              reason: "local router matched nothing")
-        } else if routingMode == .shadow, isFinal {
-            await considerJev(text: trimmed, isFinal: isFinal,
-                              reason: "shadow mode — router found clauses but dispatched none",
-                              dryRun: true)
+        if clauses.isEmpty, routingMode != .jevFirst {
+            _ = await considerJev(text: trimmed, isFinal: isFinal,
+                                  reason: "local router matched nothing")
+        } else {
+            await askShadowIfNeeded(text: trimmed, isFinal: isFinal)
         }
+    }
+
+    /// One observe-only consultation per command, on the final transcript.
+    ///
+    /// Asking on every stable-prefix growth produced several near-identical
+    /// entries per command, which made the history harder to read than not
+    /// having it.
+    private func askShadowIfNeeded(text: String, isFinal: Bool) async {
+        guard routingMode == .shadow, isFinal, !shadowAsked else { return }
+        shadowAsked = true
+        _ = await considerJev(text: text,
+                              isFinal: isFinal,
+                              reason: "shadow mode — comparing against the local router",
+                              dryRun: true)
     }
 
     // MARK: Local dispatch
@@ -200,22 +224,24 @@ actor ActionPlanner {
 
     // MARK: Jev
 
+    /// Returns true when this consultation produced a dispatched action.
+    @discardableResult
     private func considerJev(text: String,
                              isFinal: Bool,
                              reason: String,
-                             dryRun: Bool = false) async {
+                             dryRun: Bool = false) async -> Bool {
         guard let decisionProvider else {
             // Worth surfacing: "no key" and "Jev declined" look identical otherwise.
             report(JevConsultation(transcript: text, reason: reason),
                    outcome: "not consulted — Jev is disabled or has no API key")
-            return
+            return false
         }
-        guard TranscriptManager.words(text).count >= 2 else { return }
-        guard !jevInFlight else { return }
-        guard dryRun || text != lastJevText else { return }
+        guard TranscriptManager.words(text).count >= 2 else { return false }
+        guard !jevInFlight else { return false }
+        guard dryRun || text != lastJevText else { return false }
 
         if !dryRun, let lastJevAt, ContinuousClock.now - lastJevAt < minimumJevInterval {
-            return
+            return false
         }
 
         jevInFlight = true
@@ -238,7 +264,7 @@ actor ActionPlanner {
                 ?? error.localizedDescription
             log(.jev, "unavailable (\(message)) — local commands only")
             report(consultation, outcome: "error — \(message)")
-            return
+            return false
         }
 
         consultation.chosenAction = decision.actionType?.rawValue ?? "none"
@@ -251,41 +277,59 @@ actor ActionPlanner {
 
         guard let actionType = decision.actionType else {
             report(consultation, outcome: "declined — no applicable action")
-            return
+            return false
         }
         if dryRun {
             report(consultation, outcome: "shadow only — the local router already handled this")
-            return
+            return false
         }
         if decision.needsMoreSpeech && !isFinal {
             log(.jev, "needs more speech — holding \(actionType.rawValue)")
             report(consultation, outcome: "held — needs more speech")
-            return
+            return false
         }
 
-        var parameters: [String: String] = [:]
-        let requiredKeys = SarvamParameterExtractor.allowedKeys(for: actionType)
-        if !requiredKeys.isEmpty {
-            guard let extractor else {
-                log(.jev, "\(actionType.rawValue) needs parameters but no extractor is configured")
-                report(consultation, outcome: "blocked — \(actionType.rawValue) needs parameters but no extractor is configured")
-                return
+        // Deterministic parsing first. Jev picks the action; the words for its
+        // parameters are already in the transcript, so recovering "chrome" from
+        // "open chrome" needs no model — and asking one adds a network round
+        // trip and a failure mode for nothing.
+        var parameters = deterministicParameters(for: actionType, text: text)
+        let missing = actionType.requiredParameterKeys.filter {
+            parameters[$0]?.isEmpty != false
+        }
+
+        if missing.isEmpty {
+            if !parameters.isEmpty {
+                log(.planner, "parameters resolved locally for \(actionType.rawValue) — no text model needed")
             }
+        } else {
+            guard let extractor else {
+                log(.jev, "\(actionType.rawValue) is missing \(missing) and no text model is configured")
+                report(consultation, outcome: "blocked — missing \(missing.joined(separator: ", ")) and no text model is configured")
+                return false
+            }
+            log(.llm, "local parsing could not supply \(missing) for \(actionType.rawValue) — asking the text model")
             do {
-                parameters = try await extractor.extractParameters(for: actionType,
-                                                                    transcript: text,
-                                                                    context: context)
+                let extracted = try await extractor.extractParameters(for: actionType,
+                                                                       transcript: text,
+                                                                       context: context)
+                // Locally parsed values win; the model only fills the gaps.
+                parameters.merge(extracted) { local, _ in local }
             } catch {
                 let message = (error as? LocalizedError)?.errorDescription
                     ?? error.localizedDescription
                 log(.llm, "parameter extraction failed: \(message)")
                 report(consultation, outcome: "blocked — parameter extraction failed: \(message)")
-                return
+                return false
             }
-            guard !parameters.isEmpty else {
-                log(.jev, "no parameters extracted for \(actionType.rawValue) — skipping")
-                report(consultation, outcome: "declined — no parameters could be extracted")
-                return
+
+            let stillMissing = actionType.requiredParameterKeys.filter {
+                parameters[$0]?.isEmpty != false
+            }
+            guard stillMissing.isEmpty else {
+                log(.jev, "still missing \(stillMissing) for \(actionType.rawValue) — skipping")
+                report(consultation, outcome: "declined — could not resolve \(stillMissing.joined(separator: ", "))")
+                return false
             }
         }
 
@@ -303,7 +347,7 @@ actor ActionPlanner {
         guard let request = decided.action(sourceText: text,
                                             dependencies: lastAppActionID.map { [$0] } ?? []) else {
             report(consultation, outcome: "declined — could not build an action")
-            return
+            return false
         }
         consultation.applied = true
         report(consultation, outcome: "dispatched \(request.summary)")
@@ -313,7 +357,49 @@ actor ActionPlanner {
         if isAppClause, let spoken = parameters["app"] {
             resolvedBundleID = await registry.resolve(spoken)?.bundleIdentifier
         }
-        _ = await submit(request, isAppClause: isAppClause, bundleID: resolvedBundleID)
+        let id = await submit(request, isAppClause: isAppClause, bundleID: resolvedBundleID)
+        return id != nil
+    }
+
+    /// Pulls an action's parameters out of the transcript with the same
+    /// deterministic parser the local router uses.
+    ///
+    /// Jev chooses *which* action; the words for its parameters are already
+    /// spoken. The router's clause types may not match Jev's choice — Jev might
+    /// say `focusApp` where the router parsed `openApp` — so values are matched
+    /// by parameter key rather than by clause type, since both need `app`.
+    private func deterministicParameters(for actionType: ActionType,
+                                         text: String) -> [String: String] {
+        let wanted = SarvamParameterExtractor.allowedKeys(for: actionType)
+        guard !wanted.isEmpty else { return [:] }
+
+        var found: [String: String] = [:]
+        for clause in router.parse(text) {
+            for key in wanted where found[key] == nil {
+                if let value = clause.parameters[key], !value.isEmpty {
+                    found[key] = value
+                }
+            }
+        }
+
+        // A spoken target can land under a different key than the one this
+        // action wants — "open chrome" yields `app`, but Jev may have chosen
+        // `click`, which wants `target`. These names refer to the same words.
+        let interchangeable = ["app", "target", "query", "command", "text"]
+        for key in wanted where found[key] == nil {
+            guard interchangeable.contains(key) else { continue }
+            for clause in router.parse(text) {
+                for alias in interchangeable where alias != key {
+                    if let value = clause.parameters[alias], !value.isEmpty {
+                        found[key] = value
+                        break
+                    }
+                }
+                if found[key] != nil { break }
+            }
+        }
+
+        return found
     }
 
     private func report(_ consultation: JevConsultation, outcome: String) {

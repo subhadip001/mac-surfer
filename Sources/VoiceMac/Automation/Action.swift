@@ -48,6 +48,28 @@ enum ActionType: String, Sendable, CaseIterable, Codable {
         }
     }
 
+    /// Parameters without which the action cannot run at all.
+    ///
+    /// Distinct from the full key list: `typeText` accepts a `target`, but only
+    /// `text` is essential. Used to decide whether a text model is needed —
+    /// if deterministic parsing already supplied these, it is not.
+    var requiredParameterKeys: [String] {
+        switch self {
+        case .openApp, .closeApp, .focusApp: return ["app"]
+        case .openURL: return ["url"]
+        case .searchWeb, .searchInApp: return ["query"]
+        case .typeText, .sendMessage: return ["text"]
+        case .click, .doubleClick, .rightClick, .focusElement: return ["target"]
+        case .clickAt: return ["x", "y"]
+        case .menuCommand: return ["command"]
+        case .pressKey: return ["key"]
+        // These either need nothing or have a sensible default.
+        case .clearField, .scroll, .setVolume, .screenshot,
+             .mute, .unmute, .copy, .paste:
+            return []
+        }
+    }
+
     /// True when the action carries free text whose exact content matters.
     /// Such actions must not fire from a prefix that is still growing.
     var carriesFreeText: Bool {

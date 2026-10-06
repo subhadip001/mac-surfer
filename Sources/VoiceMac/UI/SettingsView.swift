@@ -273,8 +273,9 @@ struct SettingsView: View {
                 get: { state.settings.llmModel },
                 set: { state.settings.llmModel = $0 }
             )) {
-                Text("sarvam-30b (faster)").tag("sarvam-30b")
-                Text("sarvam-105b (stronger)").tag("sarvam-105b")
+                ForEach(Settings.availableLLMModels, id: \.self) { model in
+                    Text(model).tag(model)
+                }
             }
             Text("Jev returns typed answers only, so a text model supplies string parameters such as a search query.")
                 .font(.caption).foregroundStyle(.secondary)

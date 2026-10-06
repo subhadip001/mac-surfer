@@ -137,7 +137,9 @@ enum DecisionError: LocalizedError {
         case .badResponse(let detail):
             return "Unexpected decision response: \(detail)"
         case .http(let code, let body):
-            return "Decision request failed (HTTP \(code)): \(body)"
+            // Shared by the decision engine and the parameter extractor, so
+            // the wording must not claim it was a decision call.
+            return "Request failed (HTTP \(code)): \(body)"
         }
     }
 }

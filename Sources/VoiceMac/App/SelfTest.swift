@@ -270,6 +270,17 @@ enum SelfTest {
         expect(close.riskLevel == .caution, "closeApp is caution, not safe",
                detail: close.riskLevel.label)
 
+        // Required-key sets decide whether a text model is needed at all.
+        expect(ActionType.openApp.requiredParameterKeys == ["app"],
+               "openApp requires only an app name")
+        expect(ActionType.typeText.requiredParameterKeys == ["text"],
+               "typeText requires text but not a target field",
+               detail: "\(ActionType.typeText.requiredParameterKeys)")
+        expect(ActionType.screenshot.requiredParameterKeys.isEmpty,
+               "screenshot requires no parameters, so never needs a text model")
+        expect(ActionType.clearField.requiredParameterKeys.isEmpty,
+               "clearField falls back to the focused field")
+
         expect(ActionType.searchWeb.carriesFreeText, "searchWeb carries free text")
         expect(!ActionType.openApp.carriesFreeText, "openApp does not carry free text")
 

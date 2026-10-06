@@ -126,6 +126,7 @@ actor SessionManager {
     /// Indexes installed applications at launch so the first "open <app>" does
     /// not pay for a filesystem scan.
     func warmUp() async {
+        startSchedulerPump()
         await registry.refresh()
     }
 
@@ -210,6 +211,7 @@ actor SessionManager {
         }
 
         startTranscriptPump(provider)
+        // The scheduler pump is started once in `warmUp`, not per session.
         startSchedulerPump()
 
         let chunks: AsyncStream<AudioChunk>
@@ -265,11 +267,18 @@ actor SessionManager {
         }
     }
 
+    /// Starts the scheduler event pump exactly once for the lifetime of this
+    /// manager.
+    ///
+    /// `AsyncStream` supports a single iteration. The scheduler is long-lived,
+    /// so re-subscribing per session silently stopped delivering action events
+    /// after the first command of a launch — history recorded "no action" for
+    /// commands that had plainly run.
     private func startSchedulerPump() {
+        guard schedulerPump == nil else { return }
         schedulerPump = Task { [weak self] in
             guard let self else { return }
             for await event in self.scheduler.events {
-                guard !Task.isCancelled else { return }
                 await self.handle(schedulerEvent: event)
             }
         }
@@ -487,7 +496,8 @@ actor SessionManager {
         historyBackstop?.cancel(); historyBackstop = nil
         audioPump?.cancel(); audioPump = nil
         transcriptPump?.cancel(); transcriptPump = nil
-        schedulerPump?.cancel(); schedulerPump = nil
+        // Deliberately NOT cancelling schedulerPump: it is per-manager, not
+        // per-session, and its AsyncStream cannot be iterated a second time.
 
         audio.stop()
         if let stt { await stt.stop() }
